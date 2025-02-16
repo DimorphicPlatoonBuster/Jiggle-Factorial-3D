@@ -93,6 +93,20 @@
       border-radius: 50%;
       pointer-events: none;
     }
+
+    #center-dot.blink {
+      animation: fadeInOut 2s infinite;
+    }
+
+    @keyframes fadeInOut {
+      0%, 100% {
+        opacity: 0.3;
+      }
+      50% {
+        opacity: 1;
+      }
+    }
+
     .dg.main {
       background: rgba(40, 40, 40, 0.8);
     }
@@ -253,7 +267,10 @@
         numBlueDistractors: 5,
         numColoredDistractors: 5,
         ballSpeed: 0.1,
-        boxSize: 50,
+        ballOpacity: 1.0,
+        boxX: 50,
+        boxY: 50,
+        boxZ: 50,
         screenRotation: true,
         screenRotationSpeed: 0.002,
         screenRotationDistance: 60,
@@ -262,9 +279,11 @@
         rotateZ: true,
         varyRotationDistance: false,
         highlightDuration: 1000,
+        highlightSimultaneously: false,
         delayAfterSequence: 1000,
         numberSize: 3,
         dotSize: 5, // Center Dot Size
+        blinkDot: false,
         // Flash Mode settings
         flashMode: false,
         flashDurationMin: 160,
@@ -347,7 +366,10 @@
       gui.add(settings, 'numBlueDistractors').name('# Blue Distractors');
       gui.add(settings, 'numColoredDistractors').name('# Colored Distractors');
       gui.add(settings, 'ballSpeed').name('Ball Speed');
-      gui.add(settings, 'boxSize').name('Box Size');
+      gui.add(settings, 'boxX').name('Box Width');
+      gui.add(settings, 'boxY').name('Box Height');
+      gui.add(settings, 'boxZ').name('Box Depth');
+      gui.add(settings, 'ballOpacity').min(0.5).max(1.0).name('Ball Opacity');
 
       const screenRotationFolder = gui.addFolder('Screen Rotation');
       screenRotationFolder.add(settings, 'screenRotation').name('Enable');
@@ -359,11 +381,13 @@
       screenRotationFolder.add(settings, 'varyRotationDistance').name('Vary Distance');
 
       gui.add(settings, 'highlightDuration').name('Highlight Duration');
+      gui.add(settings, 'highlightSimultaneously').name('Highlight Together');
       gui.add(settings, 'delayAfterSequence').name('Delay After');
       gui.add(settings, 'numberSize').name('Number Size');
 
       // Add Center Dot Size Controller
       gui.add(settings, 'dotSize').name('Center Dot Size').min(0).onChange(updateCenterDot);
+      gui.add(settings, 'blinkDot').name('Make Dot Blink').onChange(updateCenterDot);
 
       // Flash Mode GUI
       const flashModeFolder = gui.addFolder('Flash Mode Settings');
@@ -414,7 +438,10 @@
       renderer.domElement.addEventListener('pointerdown', onDocumentMouseDown, false);
 
       gui.__controllers.forEach(controller => {
+        const originalOnChange = controller.__onChange;
         controller.onChange((value) => {
+          if (originalOnChange)
+            originalOnChange(value);
           updateSettings();
           saveSettings();
         });
@@ -458,6 +485,13 @@
         centerDotElement.style.display = 'block';
         centerDotElement.style.width = `${size}px`;
         centerDotElement.style.height = `${size}px`;
+      }
+
+      const shouldBlinkDot = settings.blinkDot;
+      if (shouldBlinkDot) {
+        centerDotElement.classList.add('blink');
+      } else {
+        centerDotElement.classList.remove('blink');
       }
     }
 
@@ -578,10 +612,12 @@
     }
 
     function createBoundingBox() {
-      const boxSize = settings.boxSize;
+      const boxX = settings.boxX;
+      const boxY = settings.boxY;
+      const boxZ = settings.boxZ;
 
       // Create the solid box with slightly opaque walls
-      const geometry = new THREE.BoxGeometry(boxSize, boxSize, boxSize);
+      const geometry = new THREE.BoxGeometry(boxX, boxY, boxZ);
       const material = new THREE.MeshPhongMaterial({
         color: 0x888888,
         transparent: true,
@@ -660,6 +696,8 @@
         roughness: 0.65,
         emissive: "#FFFFFF",
         emissiveIntensity: 0.1,
+        transparent: true,
+        opacity: settings.ballOpacity,
       });
       const ball = new THREE.Mesh(geometry, material);
       ball.castShadow = true;
@@ -697,10 +735,12 @@
 
       while (!positionFound && attempts < maxAttempts) {
         attempts++;
-        const halfBox = settings.boxSize / 2 - 5;
-        ball.position.x = (Math.random() - 0.5) * (halfBox * 2);
-        ball.position.y = (Math.random() - 0.5) * (halfBox * 2);
-        ball.position.z = (Math.random() - 0.5) * (halfBox * 2);
+        const halfX = settings.boxX / 2 - 5;
+        const halfY = settings.boxY / 2 - 5;
+        const halfZ = settings.boxZ / 2 - 5;
+        ball.position.x = (Math.random() - 0.5) * (halfX * 2);
+        ball.position.y = (Math.random() - 0.5) * (halfY * 2);
+        ball.position.z = (Math.random() - 0.5) * (halfZ * 2);
 
         let overlapping = false;
         for (let pos of positions) {
@@ -788,8 +828,29 @@
         highlightSequence = shuffleArray(highlightSequence);
       }
 
+      function highlightAllBalls(callback) {
+        isSequenceShowing = true;
+        for (const object of highlightSequence) {
+          object.ball.material.color.set(0xff0000);
+          object.ball.userData.isCurrentlyHighlighted = true;
+          addNumberLabel(object.ball, object.number);
+        }
+        let timeout = setTimeout(() => {
+          for (const object of highlightSequence) {
+            object.ball.material.color.set(0x87CEEB);
+            object.ball.userData.isCurrentlyHighlighted = false; // Unmark as highlighted
+            disposeLabel(object.ball);
+            object.ball.remove(object.ball.userData.label);
+            object.ball.userData.label = null;
+          }
+          isSequenceShowing = false;
+          callback();
+        }, settings.highlightDuration);
+        activeTimeouts.push(timeout);
+      }
+
       let index = 0;
-      function highlightNextBall() {
+      function highlightNextBall(callback) {
         if (index > 0) {
           // Reset previous ball color
           const previous = highlightSequence[index - 1];
@@ -810,7 +871,7 @@
           // Add number label
           addNumberLabel(current.ball, current.number);
           index++;
-          let timeout = setTimeout(highlightNextBall, settings.highlightDuration);
+          let timeout = setTimeout(() => highlightNextBall(callback), settings.highlightDuration);
           activeTimeouts.push(timeout);
         } else {
           // End of sequence
@@ -822,68 +883,75 @@
           disposeLabel(lastBall.userData.label);
           lastBall.remove(lastBall.userData.label);
           lastBall.userData.label = null;
-
-          // Determine the order
-          let possibleOrders;
-
-          if (settings.orderMode === 'Descending') {
-            currentOrder = 'Descending';
-            targetSequence = targetSequence.slice().reverse();
-          } else if (settings.orderMode === 'Combined') {
-            // Original combined: choose Ascending or Descending
-            currentOrder = Math.random() < 0.5 ? 'Ascending' : 'Descending';
-            if (currentOrder === 'Descending') {
-              targetSequence = targetSequence.slice().reverse();
-            }
-          } else if (settings.orderMode === 'Extended Combined' && settings.isRandomMode) {
-            // Extended combined only applies if random mode is on
-            // The four possible orders: Ascending, Descending, Presented, Reverse Presented
-            // 'highlightSequence' represents the order they were presented.
-            possibleOrders = ['Ascending', 'Descending', 'Presented', 'Reverse Presented'];
-            currentOrder = possibleOrders[Math.floor(Math.random()*possibleOrders.length)];
-
-            if (currentOrder === 'Ascending') {
-              targetSequence = targetSequence.slice().sort((a, b) => a.number - b.number);
-            } else if (currentOrder === 'Descending') {
-              targetSequence = targetSequence.slice().sort((a, b) => b.number - a.number);
-            } else if (currentOrder === 'Presented') {
-              // Presented order: use the highlightSequence order as is
-              // targetSequence should reflect the order they were highlighted
-              // highlightSequence currently holds that order
-              targetSequence = highlightSequence;
-            } else if (currentOrder === 'Reverse Presented') {
-              // Reverse of presented order
-              targetSequence = highlightSequence.slice().reverse();
-            }
-          } else {
-            // Default to Ascending if extended combined chosen but random mode not active, or any fallback
-            currentOrder = 'Ascending';
-            targetSequence = targetSequence.slice().sort((a, b) => a.number - b.number);
-          }
-
-
-          // Start delay before user can interact
-          messageElement.textContent = 'Get Ready...';
-          let timeout = setTimeout(() => {
-            isUserTurn = true;
-            mistakeMade = false; // Reset mistake flag
-            if (settings.isRegular3DMOT) {
-              messageElement.textContent = 'Select in any order';
-            } else {
-              messageElement.textContent = 'Your Turn! Select in ' + currentOrder + ' order.';
-            }
-
-            // Freeze balls
-            freezeBalls();
-          }, settings.delayAfterSequence);
-          activeTimeouts.push(timeout);
+          callback();
         }
       }
-      highlightNextBall();
+  
+      function afterHighlight() {
+        // Determine the order
+        let possibleOrders;
+
+        if (settings.orderMode === 'Descending') {
+          currentOrder = 'Descending';
+          targetSequence = targetSequence.slice().reverse();
+        } else if (settings.orderMode === 'Combined') {
+          // Original combined: choose Ascending or Descending
+          currentOrder = Math.random() < 0.5 ? 'Ascending' : 'Descending';
+          if (currentOrder === 'Descending') {
+            targetSequence = targetSequence.slice().reverse();
+          }
+        } else if (settings.orderMode === 'Extended Combined' && settings.isRandomMode) {
+          // Extended combined only applies if random mode is on
+          // The four possible orders: Ascending, Descending, Presented, Reverse Presented
+          // 'highlightSequence' represents the order they were presented.
+          possibleOrders = ['Ascending', 'Descending', 'Presented', 'Reverse Presented'];
+          currentOrder = possibleOrders[Math.floor(Math.random()*possibleOrders.length)];
+
+          if (currentOrder === 'Ascending') {
+            targetSequence = targetSequence.slice().sort((a, b) => a.number - b.number);
+          } else if (currentOrder === 'Descending') {
+            targetSequence = targetSequence.slice().sort((a, b) => b.number - a.number);
+          } else if (currentOrder === 'Presented') {
+            // Presented order: use the highlightSequence order as is
+            // targetSequence should reflect the order they were highlighted
+            // highlightSequence currently holds that order
+            targetSequence = highlightSequence;
+          } else if (currentOrder === 'Reverse Presented') {
+            // Reverse of presented order
+            targetSequence = highlightSequence.slice().reverse();
+          }
+        } else {
+          // Default to Ascending if extended combined chosen but random mode not active, or any fallback
+          currentOrder = 'Ascending';
+          targetSequence = targetSequence.slice().sort((a, b) => a.number - b.number);
+        }
+
+
+        // Start delay before user can interact
+        messageElement.textContent = 'Get Ready...';
+        let timeout = setTimeout(() => {
+          isUserTurn = true;
+          mistakeMade = false; // Reset mistake flag
+          if (settings.isRegular3DMOT) {
+            messageElement.textContent = 'Select in any order';
+          } else {
+            messageElement.textContent = 'Your Turn! Select in ' + currentOrder + ' order.';
+          }
+
+          // Freeze balls
+          freezeBalls();
+        }, settings.delayAfterSequence);
+        activeTimeouts.push(timeout);
+      }
+      if (settings.highlightSimultaneously)
+        highlightAllBalls(afterHighlight);
+      else
+        highlightNextBall(afterHighlight);
     }
 
     function addNumberLabel(ball, number) {
       if (!loadedFont) return; // Ensure the font is loaded
+      if (settings.isRegular3DMOT) return;
 
       const geometry = new THREE.TextGeometry(number.toString(), {
         font: loadedFont,
@@ -894,23 +962,29 @@
       const material = new THREE.MeshBasicMaterial({ color: 0xffffff });
       const textMesh = new THREE.Mesh(geometry, material);
 
+      const outlineMaterial = new THREE.MeshBasicMaterial({ color: 0x000000, side: THREE.BackSide, });
+      const outlineMesh = new THREE.Mesh(geometry, outlineMaterial);
+      outlineMesh.scale.set(1.05, 1.05, 1.05);
+
+      const textGroup = new THREE.Group();
+      textGroup.add(textMesh);
+      textGroup.add(outlineMesh);
+
       // Center the text geometry
       geometry.computeBoundingBox();
       const centerOffsetX = -0.5 * (geometry.boundingBox.max.x - geometry.boundingBox.min.x);
       const centerOffsetY = -0.5 * (geometry.boundingBox.max.y - geometry.boundingBox.min.y);
       const offsetZ = 1.6 + settings.numberSize * 0.1; // Adjust Z based on number size
-      textMesh.position.set(centerOffsetX, centerOffsetY, offsetZ);
+      textGroup.position.set(centerOffsetX, centerOffsetY, offsetZ);
 
-      textMesh.userData.isLabel = true; // Mark as label for easy identification
-      ball.add(textMesh);
-      ball.userData.label = textMesh;
+      textGroup.userData.isLabel = true; // Mark as label for easy identification
+      ball.add(textGroup);
+      ball.userData.label = textGroup;
     }
 
     function disposeLabel(label) {
-      if (label) {
-        if (label.geometry) label.geometry.dispose();
-        if (label.material) label.material.dispose();
-      }
+      if (!label) return;
+      disposeObject(label);
     }
 
     function freezeBalls() {
@@ -1353,7 +1427,8 @@
           target.ball.remove(target.ball.userData.label);
           target.ball.userData.label = null;
         }
-        target.ball.material.color.set(0x00ff00); // Turn green
+        if (!userSequence.includes(target.ball))
+          target.ball.material.color.set(0x00ff00); // Turn green
         addNumberLabel(target.ball, i + 1); // Add number label
       }
     }
@@ -1451,18 +1526,26 @@
           ball.position.add(ball.userData.velocity);
 
           // Bounce off walls
-          const halfBox = settings.boxSize / 2 - 2;
-          if (ball.position.x > halfBox || ball.position.x < -halfBox) {
-            ball.userData.velocity.x *= -1;
-            ball.position.x = THREE.MathUtils.clamp(ball.position.x, -halfBox, halfBox);
+          const halfX = settings.boxX / 2 - 2;
+          const halfY = settings.boxY / 2 - 2;
+          const halfZ = settings.boxZ / 2 - 2;
+          if (ball.position.x > halfX || ball.position.x < -halfX) {
+            const needsFlip = (ball.position.x > halfX && ball.userData.velocity.x > 0) || (ball.position.x < -halfX && ball.userData.velocity.x < 0);
+            if (needsFlip)
+              ball.userData.velocity.x *= -1;
+            ball.position.x = THREE.MathUtils.clamp(ball.position.x, -halfX, halfX);
           }
-          if (ball.position.y > halfBox || ball.position.y < -halfBox) {
-            ball.userData.velocity.y *= -1;
-            ball.position.y = THREE.MathUtils.clamp(ball.position.y, -halfBox, halfBox);
+          if (ball.position.y > halfY || ball.position.y < -halfY) {
+            const needsFlip = (ball.position.y > halfY && ball.userData.velocity.y > 0) || (ball.position.y < -halfY && ball.userData.velocity.y < 0);
+            if (needsFlip)
+              ball.userData.velocity.y *= -1;
+            ball.position.y = THREE.MathUtils.clamp(ball.position.y, -halfY, halfY);
           }
-          if (ball.position.z > halfBox || ball.position.z < -halfBox) {
-            ball.userData.velocity.z *= -1;
-            ball.position.z = THREE.MathUtils.clamp(ball.position.z, -halfBox, halfBox);
+          if (ball.position.z > halfZ || ball.position.z < -halfZ) {
+            const needsFlip = (ball.position.z > halfZ && ball.userData.velocity.z > 0) || (ball.position.z < -halfZ && ball.userData.velocity.z < 0);
+            if (needsFlip)
+              ball.userData.velocity.z *= -1;
+            ball.position.z = THREE.MathUtils.clamp(ball.position.z, -halfZ, halfZ);
           }
         }
       }
